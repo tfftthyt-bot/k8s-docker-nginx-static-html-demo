@@ -36,14 +36,11 @@ pipeline {
             steps {
                 script {
                     echo "📥 正在从 GitHub 拉取代码..."
-                    checkout([
-                        $class: 'GitSCM',
-                        branches: [[name: "*/${params.GIT_BRANCH}"]],
-                        userRemoteConfigs: [[
-                            url: "${env.GIT_URL}",
-                            credentialsId: 'github-credentials'  // Jenkins 中配置的 GitHub 凭证 ID
-                        ]]
-                    ])
+                    echo "分支: ${params.GIT_BRANCH}"
+
+                    // 使用 scm 变量自动获取配置的仓库信息
+                    checkout scm
+
                     echo "✅ 代码拉取完成: 分支 ${params.GIT_BRANCH}, Commit ${env.GIT_COMMIT}"
                 }
             }
