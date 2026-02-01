@@ -1,5 +1,5 @@
 // Jenkinsfile - CI/CD Pipeline for GKE Deployment
-// 此 Pipeline 实现: GitHub 拉取代码 -> 构建 Docker 镜像 -> 推送到 Docker Registry -> 部署到 GKE
+// 此 Pipeline 实现: GitHub 拉取代码 -> 构建 Docker 镜像 -> 推送到 Artifact Registry -> 部署到 GKE
 
 pipeline {
     agent {
@@ -8,9 +8,10 @@ pipeline {
 
     // 环境变量配置
     environment {
-        // Docker Registry 配置
-        REGISTRY_URL = 'docker-registry.middleware.svc.cluster.local:5000'
-        // 注意: Docker Registry 没有项目概念，镜像直接存储在根路径
+        // Google Artifact Registry 配置
+        GCP_PROJECT = 'project-gcp-bigdata'
+        GCP_REGION = 'asia-northeast1'
+        REGISTRY_URL = "${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT}/iws-docker"
 
         // GKE 配置
         GKE_CLUSTER_NAME = 'gke-sws-cluster'
@@ -35,23 +36,47 @@ pipeline {
         stage('Checkout Code') {
             steps {
                 script {
-                    echo "📥 正在从 GitHub 拉取代码..."
+                    echo "正在从 GitHub 拉取代码..."
                     echo "分支: ${params.GIT_BRANCH}"
 
                     // 使用 scm 变量自动获取配置的仓库信息
                     checkout scm
 
-                    echo "✅ 代码拉取完成: 分支 ${params.GIT_BRANCH}, Commit ${env.GIT_COMMIT}"
+                    echo "代码拉取完成: 分支 ${params.GIT_BRANCH}"
                 }
             }
         }
 
-        // 阶段 2: 构建 Docker 镜像
+        // 阶段 2: 配置 Docker 认证
+        stage('Configure Docker Auth') {
+            steps {
+                container('docker') {
+                    script {
+                        echo "配置 Artifact Registry 认证..."
+
+                        // 使用 GKE 节点的 Service Account 进行认证
+                        // 通过 Workload Identity 或节点 SA 自动获取凭证
+                        sh """
+                            # 获取 access token 并配置 Docker
+                            TOKEN=\$(wget -q -O - --header="Metadata-Flavor: Google" \
+                                http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token \
+                                | sed 's/.*"access_token":"\\([^"]*\\)".*/\\1/')
+
+                            echo "\$TOKEN" | docker login -u oauth2accesstoken --password-stdin https://${GCP_REGION}-docker.pkg.dev
+                        """
+
+                        echo "Artifact Registry 认证成功"
+                    }
+                }
+            }
+        }
+
+        // 阶段 3: 构建 Docker 镜像
         stage('Build Docker Image') {
             steps {
-                container('docker') {  // 在 docker 容器中执行
+                container('docker') {
                     script {
-                        echo "🔨 正在构建 Docker 镜像..."
+                        echo "正在构建 Docker 镜像..."
                         echo "镜像名称: ${FULL_IMAGE_NAME}"
 
                         // 构建 Docker 镜像
@@ -64,21 +89,18 @@ pipeline {
                                 -f Dockerfile .
                         """
 
-                        echo "✅ Docker 镜像构建完成"
+                        echo "Docker 镜像构建完成"
                     }
                 }
             }
         }
 
-        // 阶段 3: 推送镜像到 Docker Registry
-        stage('Push to Registry') {
+        // 阶段 4: 推送镜像到 Artifact Registry
+        stage('Push to Artifact Registry') {
             steps {
-                container('docker') {  // 在 docker 容器中执行
+                container('docker') {
                     script {
-                        echo "📤 正在推送镜像到 Docker Registry..."
-
-                        // Docker Registry 默认无需认证 (内网使用)
-                        // 如果配置了认证，需要使用 withCredentials
+                        echo "正在推送镜像到 Artifact Registry..."
 
                         // 推送镜像
                         sh "docker push ${FULL_IMAGE_NAME}"
@@ -89,18 +111,18 @@ pipeline {
                             docker push ${REGISTRY_URL}/${IMAGE_NAME}:latest
                         """
 
-                        echo "✅ 镜像推送完成: ${FULL_IMAGE_NAME}"
+                        echo "镜像推送完成: ${FULL_IMAGE_NAME}"
                     }
                 }
             }
         }
 
-        // 阶段 4: 部署到 GKE
+        // 阶段 5: 部署到 GKE
         stage('Deploy to GKE') {
             steps {
-                container('kubectl') {  // 在 kubectl 容器中执行
+                container('kubectl') {
                     script {
-                        echo "🚀 正在部署到 GKE 集群..."
+                        echo "正在部署到 GKE 集群..."
                         echo "命名空间: ${GKE_NAMESPACE}"
                         echo "副本数: ${params.REPLICAS}"
 
@@ -112,7 +134,7 @@ pipeline {
 
                         if (deploymentExists) {
                             // 更新现有 Deployment
-                            echo "♻️  更新现有 Deployment..."
+                            echo "更新现有 Deployment..."
                             sh """
                                 kubectl set image deployment/${IMAGE_NAME} \
                                     ${IMAGE_NAME}=${FULL_IMAGE_NAME} \
@@ -125,7 +147,7 @@ pipeline {
                             """
                         } else {
                             // 创建新 Deployment
-                            echo "🆕 创建新 Deployment..."
+                            echo "创建新 Deployment..."
                             sh """
                                 kubectl create deployment ${IMAGE_NAME} \
                                     --image=${FULL_IMAGE_NAME} \
@@ -142,25 +164,25 @@ pipeline {
                         }
 
                         // 等待部署完成
-                        echo "⏳ 等待 Deployment 就绪..."
+                        echo "等待 Deployment 就绪..."
                         sh """
                             kubectl rollout status deployment/${IMAGE_NAME} \
                                 -n ${GKE_NAMESPACE} \
                                 --timeout=5m
                         """
 
-                        echo "✅ 部署完成！"
+                        echo "部署完成！"
                     }
                 }
             }
         }
 
-        // 阶段 5: 验证部署
+        // 阶段 6: 验证部署
         stage('Verify Deployment') {
             steps {
-                container('kubectl') {  // 在 kubectl 容器中执行
+                container('kubectl') {
                     script {
-                        echo "🔍 验证部署状态..."
+                        echo "验证部署状态..."
 
                         // 查看 Pod 状态
                         sh """
@@ -180,10 +202,10 @@ pipeline {
                             returnStdout: true
                         ).trim()
 
-                        echo "✅ 当前运行的 Pod 数量: ${podCount}"
+                        echo "当前运行的 Pod 数量: ${podCount}"
 
                         if (podCount.toInteger() < params.REPLICAS.toInteger()) {
-                            error "❌ 部署失败: 期望 ${params.REPLICAS} 个副本, 实际运行 ${podCount} 个"
+                            error "部署失败: 期望 ${params.REPLICAS} 个副本, 实际运行 ${podCount} 个"
                         }
                     }
                 }
@@ -196,15 +218,15 @@ pipeline {
         success {
             echo """
             ========================================
-            ✅ Pipeline 执行成功！
+            Pipeline 执行成功！
             ========================================
             应用名称:   ${IMAGE_NAME}
             镜像版本:   ${IMAGE_TAG}
+            镜像地址:   ${FULL_IMAGE_NAME}
             部署环境:   ${params.DEPLOY_ENV}
             命名空间:   ${GKE_NAMESPACE}
             副本数量:   ${params.REPLICAS}
             Git 分支:   ${params.GIT_BRANCH}
-            Git Commit: ${env.GIT_COMMIT}
             ========================================
             """
         }
@@ -212,7 +234,7 @@ pipeline {
         failure {
             echo """
             ========================================
-            ❌ Pipeline 执行失败！
+            Pipeline 执行失败！
             ========================================
             应用名称: ${IMAGE_NAME}
             构建编号: ${env.BUILD_NUMBER}
@@ -222,7 +244,7 @@ pipeline {
         }
 
         always {
-            container('docker') {  // 在 docker 容器中执行清理
+            container('docker') {
                 // 清理本地 Docker 镜像 (节省空间)
                 sh """
                     docker rmi ${FULL_IMAGE_NAME} || true
@@ -230,7 +252,7 @@ pipeline {
                 """
             }
 
-            // 清理工作空间 (可选)
+            // 清理工作空间
             cleanWs()
         }
     }
